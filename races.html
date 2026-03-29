@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>出走表・AI予想</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans JP', sans-serif;
+            background-color: #1a202c;
+            color: #e2e8f0;
+        }
+        .accent-gold { color: #FFD700; }
+        .bg-accent-gold { background-color: #FFD700; color: #1a202c; }
+        .border-accent-gold { border-color: #FFD700; }
+
+        .tab-btn { cursor: pointer; padding: 8px 16px; border-bottom: 2px solid transparent; transition: all 0.2s; }
+        .tab-btn:hover { color: #FFD700; }
+        .tab-btn.active { border-bottom: 2px solid #FFD700; color: #FFD700; }
+
+        .modal-bg { background: rgba(0, 0, 0, 0.75); }
+        .tip { position: relative; cursor: help; border-bottom: 1px dashed #9CA3AF; }
+        .tip::after {
+            content: attr(data-tip);
+            position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%);
+            background: #1e293b; color: #e2e8f0; border: 1px solid #475569;
+            border-radius: 6px; padding: 6px 10px; font-size: 12px;
+            white-space: pre-line; max-width: 280px; z-index: 100;
+            opacity: 0; pointer-events: none; transition: opacity 0.2s;
+        }
+        .tip:hover::after { opacity: 1; pointer-events: auto; }
+
+        /* 印カラー */
+        .mark-honmei { color: #EF4444; font-weight: bold; }
+        .mark-taikou { color: #3B82F6; font-weight: bold; }
+        .mark-tanana { color: #F59E0B; font-weight: bold; }
+        .mark-renka { color: #10B981; }
+
+        /* ライン色 */
+        .line-0 { border-left: 3px solid #EF4444; }
+        .line-1 { border-left: 3px solid #3B82F6; }
+        .line-2 { border-left: 3px solid #F59E0B; }
+        .line-3 { border-left: 3px solid #10B981; }
+        .line-4 { border-left: 3px solid #A855F7; }
+        .line-tanki { border-left: 3px solid #6B7280; }
+
+        /* 荒れ度バー */
+        .upset-bar { height: 8px; border-radius: 4px; transition: width 0.5s ease; }
+
+        /* スクロールバー */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #2d3748; }
+        ::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 4px; }
+
+        /* レース時刻帯 */
+        .time-past { opacity: 0.5; }
+        .time-soon { border-left: 3px solid #EF4444; }
+        .time-upcoming { border-left: 3px solid #F59E0B; }
+    </style>
+</head>
+<body class="min-h-screen">
+<div id="app">
+    <!-- ヘッダー -->
+    <header class="bg-gray-900 border-b border-gray-700 sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 py-3">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-xl font-bold accent-gold">出走表・AI予想</h1>
+                    <p class="text-xs text-gray-400 mt-1">
+                        {{ meta.date ? formatDate(meta.date) : '' }}
+                        <span v-if="meta.total_races"> — {{ meta.total_races }}レース / {{ meta.venues?.length || 0 }}場</span>
+                    </p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <a href="index.html" class="text-sm text-gray-400 hover:text-white">名鑑</a>
+                    <a href="results.html" class="text-sm text-gray-400 hover:text-white">結果</a>
+                    <span class="text-xs text-gray-500">更新: {{ meta.generated_at || '—' }}</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- フィルタバー -->
+    <div class="bg-gray-800/50 border-b border-gray-700">
+        <div class="max-w-7xl mx-auto px-4 py-2 flex flex-wrap items-center gap-3">
+            <!-- 開催場フィルタ -->
+            <div class="flex gap-1 flex-wrap">
+                <button
+                    class="tab-btn text-sm"
+                    :class="{ active: selectedVenue === '' }"
+                    @click="selectedVenue = ''"
+                >全場</button>
+                <button
+                    v-for="v in venues"
+                    :key="v"
+                    class="tab-btn text-sm"
+                    :class="{ active: selectedVenue === v }"
+                    @click="selectedVenue = v"
+                >{{ v }}</button>
+            </div>
+            <!-- 購入推奨のみ -->
+            <label class="flex items-center gap-1 text-sm text-gray-400 ml-auto">
+                <input type="checkbox" v-model="showBetOnly" class="rounded">
+                購入推奨のみ
+            </label>
+        </div>
+    </div>
+
+    <!-- メインコンテンツ -->
+    <main class="max-w-7xl mx-auto px-4 py-4">
+        <!-- データなし -->
+        <div v-if="!races.length" class="text-center py-20 text-gray-500">
+            <p class="text-lg">レースデータがありません</p>
+            <p class="text-sm mt-2">python generate_races_json.py を実行してデータを生成してください</p>
+        </div>
+
+        <!-- レースカード一覧 -->
+        <div v-for="race in filteredRaces" :key="race.race_id" class="mb-6">
+            <div
+                class="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden"
+                :class="raceTimeClass(race)"
+            >
+                <!-- レースヘッダー -->
+                <div
+                    class="px-4 py-3 flex items-center justify-between cursor-pointer"
+                    :class="race.ai_prediction?.should_bet ? 'bg-yellow-900/20' : 'bg-gray-800'"
+                    @click="toggleRace(race.race_id)"
+                >
+                    <div class="flex items-center gap-3">
+                        <span class="text-2xl font-bold accent-gold">{{ race.race_number }}R</span>
+                        <div>
+                            <span class="text-white font-bold">{{ race.racecourse }}</span>
+                            <span class="text-gray-400 text-sm ml-2">{{ race.race_name }}</span>
+                        </div>
+                        <span v-if="race.start_time" class="text-sm text-gray-400">
+                            {{ race.start_time }}発走
+                        </span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <!-- 荒れ度ミニ表示 -->
+                        <div v-if="race.ai_prediction" class="text-right">
+                            <div class="text-xs text-gray-400">荒れ度</div>
+                            <div class="flex items-center gap-2">
+                                <div class="w-16 bg-gray-700 rounded-full h-2">
+                                    <div
+                                        class="upset-bar"
+                                        :style="{ width: (race.ai_prediction.upset_probability * 100) + '%', background: upsetColor(race.ai_prediction.upset_probability) }"
+                                    ></div>
+                                </div>
+                                <span class="text-sm font-bold" :style="{ color: upsetColor(race.ai_prediction.upset_probability) }">
+                                    {{ (race.ai_prediction.upset_probability * 100).toFixed(0) }}%
+                                </span>
+                            </div>
+                            <div class="text-xs mt-0.5">
+                                <span v-if="race.ai_prediction.should_bet" class="text-yellow-400 font-bold">★購入推奨</span>
+                                <span v-else class="text-gray-500">見送り</span>
+                                <span class="text-gray-500 ml-1">{{ race.ai_prediction.scenario }}</span>
+                            </div>
+                        </div>
+                        <!-- 展開アイコン -->
+                        <span class="text-gray-500 text-xl">{{ expandedRaces[race.race_id] ? '▼' : '▶' }}</span>
+                    </div>
+                </div>
+
+                <!-- 展開コンテンツ -->
+                <div v-show="expandedRaces[race.race_id]" class="border-t border-gray-700">
+                    <!-- ライン構成 -->
+                    <div v-if="race.lines && race.lines.length" class="px-4 py-3 bg-gray-900/30 border-b border-gray-700">
+                        <h4 class="text-xs text-gray-400 mb-2">ライン構成</h4>
+                        <div class="flex flex-wrap gap-2">
+                            <div v-for="line in race.lines" :key="line.line_index"
+                                 class="flex items-center gap-1 px-2 py-1 rounded text-sm"
+                                 :class="line.is_tanki ? 'bg-gray-700/50' : 'bg-gray-700'"
+                            >
+                                <span v-if="line.is_tanki" class="text-gray-400">単:</span>
+                                <span v-for="(m, mi) in line.members" :key="m.waku">
+                                    <span class="font-bold" :style="{ color: lineColor(line.line_index) }">{{ m.waku }}</span>
+                                    <span class="text-gray-300">{{ m.player_name }}</span>
+                                    <span v-if="mi < line.members.length - 1" class="text-gray-500 mx-0.5">-</span>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 出走表テーブル -->
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="bg-gray-900/50 text-gray-400 text-xs">
+                                    <th class="px-2 py-2 text-center w-8">印</th>
+                                    <th class="px-2 py-2 text-center w-8">枠</th>
+                                    <th class="px-2 py-2 text-left">選手名</th>
+                                    <th class="px-2 py-2 text-center">級班</th>
+                                    <th class="px-2 py-2 text-right">得点</th>
+                                    <th class="px-2 py-2 text-center hidden sm:table-cell">脚質</th>
+                                    <th class="px-2 py-2 text-center hidden md:table-cell">決まり手</th>
+                                    <th class="px-2 py-2 text-center hidden md:table-cell">B</th>
+                                    <th class="px-2 py-2 text-center hidden md:table-cell">S</th>
+                                    <th class="px-2 py-2 text-right hidden lg:table-cell">勝率</th>
+                                    <th class="px-2 py-2 text-right hidden lg:table-cell">連率</th>
+                                    <th class="px-2 py-2 text-right">1着率</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="p in sortedPlayers(race)" :key="p.waku"
+                                    class="border-t border-gray-700/50 hover:bg-gray-700/30"
+                                    :class="lineClass(p)"
+                                >
+                                    <td class="px-2 py-2 text-center text-lg" :class="markClass(getMark(race, p.waku))">
+                                        {{ getMark(race, p.waku) }}
+                                    </td>
+                                    <td class="px-2 py-2 text-center font-bold text-lg" :style="{ color: wakuColor(p.waku) }">
+                                        {{ p.waku }}
+                                    </td>
+                                    <td class="px-2 py-2">
+                                        <a v-if="hasPlayerDirectory(p)" :href="playerDirectoryLink(p)" class="text-white hover:text-yellow-300 font-bold">
+                                            {{ p.player_name }}
+                                        </a>
+                                        <span v-else class="text-white font-bold">{{ p.player_name }}</span>
+                                        <span class="text-gray-500 text-xs ml-1">{{ p.age }}歳 {{ p.prefecture }}</span>
+                                        <span v-if="p.is_tanki" class="text-gray-400 text-xs ml-1">[単騎]</span>
+                                    </td>
+                                    <td class="px-2 py-2 text-center">
+                                        <span class="px-1.5 py-0.5 rounded text-xs font-bold" :class="rankBadge(p.rank)">{{ p.rank }}</span>
+                                    </td>
+                                    <td class="px-2 py-2 text-right font-mono" :class="scoreColor(p.score, race.players)">
+                                        {{ p.score.toFixed(1) }}
+                                    </td>
+                                    <td class="px-2 py-2 text-center hidden sm:table-cell">{{ p.leg_type }}</td>
+                                    <td class="px-2 py-2 text-center hidden md:table-cell">
+                                        <span class="text-xs">
+                                            <span v-if="p.win_nige" class="text-red-400">逃{{ p.win_nige }}</span>
+                                            <span v-if="p.win_makuri" class="text-blue-400 ml-0.5">捲{{ p.win_makuri }}</span>
+                                            <span v-if="p.win_sashi" class="text-green-400 ml-0.5">差{{ p.win_sashi }}</span>
+                                            <span v-if="p.win_mark" class="text-purple-400 ml-0.5">マ{{ p.win_mark }}</span>
+                                        </span>
+                                    </td>
+                                    <td class="px-2 py-2 text-center hidden md:table-cell text-xs">{{ p.b_count }}</td>
+                                    <td class="px-2 py-2 text-center hidden md:table-cell text-xs">{{ p.s_count }}</td>
+                                    <td class="px-2 py-2 text-right hidden lg:table-cell">{{ p.win_rate.toFixed(1) }}%</td>
+                                    <td class="px-2 py-2 text-right hidden lg:table-cell">{{ p.rentai_rate.toFixed(1) }}%</td>
+                                    <td class="px-2 py-2 text-right font-bold">
+                                        {{ getProb1st(race, p.waku) }}
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- AI推奨買い目 -->
+                    <div v-if="race.ai_prediction?.recommended_bets?.length" class="px-4 py-3 bg-gray-900/30 border-t border-gray-700">
+                        <h4 class="text-xs text-gray-400 mb-2">AI推奨買い目（3連単）</h4>
+                        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+                            <div v-for="(bet, bi) in race.ai_prediction.recommended_bets.slice(0, 10)" :key="bi"
+                                 class="bg-gray-700/50 rounded px-2 py-1.5 text-sm"
+                            >
+                                <div class="font-bold text-white">
+                                    {{ bet.combination.join(' - ') }}
+                                </div>
+                                <div class="text-xs text-gray-400 mt-0.5">
+                                    <span v-if="bet.trifecta_odds">{{ bet.trifecta_odds.toFixed(1) }}倍</span>
+                                    <span v-if="bet.expected_value > 0" class="ml-1" :class="bet.expected_value >= 1 ? 'text-green-400' : 'text-gray-500'">
+                                        EV{{ bet.expected_value.toFixed(2) }}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 購入推奨サマリー -->
+        <div v-if="betRaces.length" class="mt-8 bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4">
+            <h3 class="text-lg font-bold accent-gold mb-3">購入推奨レース サマリー</h3>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div v-for="race in betRaces" :key="race.race_id"
+                     class="bg-gray-800 rounded p-3 cursor-pointer hover:bg-gray-700/50"
+                     @click="scrollToRace(race.race_id)"
+                >
+                    <div class="flex justify-between items-center">
+                        <span class="font-bold">{{ race.racecourse }} {{ race.race_number }}R</span>
+                        <span class="text-sm text-gray-400">{{ race.start_time }}</span>
+                    </div>
+                    <div class="text-sm mt-1">
+                        <span class="text-gray-400">{{ race.ai_prediction.scenario }}</span>
+                        <span class="ml-2 font-bold" :style="{ color: upsetColor(race.ai_prediction.upset_probability) }">
+                            荒れ度{{ (race.ai_prediction.upset_probability * 100).toFixed(0) }}%
+                        </span>
+                    </div>
+                    <div class="text-xs text-gray-400 mt-1">
+                        買い目{{ race.ai_prediction.recommended_bets?.length || 0 }}点
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- フッター -->
+    <footer class="bg-gray-900 border-t border-gray-700 py-4 mt-8">
+        <div class="max-w-7xl mx-auto px-4 text-center text-xs text-gray-500">
+            競輪AI予想システム — データ出典: keirin.netkeiba.com
+        </div>
+    </footer>
+</div>
+
+<script>
+// データ埋め込みポイント（generate時に差し替え）
+const racesData = [{"race_id": "202603294101", "race_name": "テストFI", "racecourse": "テスト場", "jyo_cd": "41", "race_number": 1, "start_time": "10:30", "players": [{"waku": 1, "player_name": "選手1", "player_id": "1001", "rank": "SS", "score": 108.0, "age": 31, "prefecture": "東京", "kiban": 91, "leg_type": "追", "gear_ratio": 3.92, "b_count": 5, "s_count": 3, "win_nige": 8, "win_makuri": 1, "win_sashi": 2, "win_mark": 0, "win_rate": 23.0, "rentai_rate": 38.0, "fukusho_rate": 53.0, "line_index": 0, "line_size": 2, "position_in_line": 0, "is_tanki": false, "upset_rate": 0.22, "dominant_style": "逃"}, {"waku": 2, "player_name": "選手2", "player_id": "1002", "rank": "S1", "score": 106.0, "age": 32, "prefecture": "東京", "kiban": 92, "leg_type": "両", "gear_ratio": 3.92, "b_count": 10, "s_count": 6, "win_nige": 6, "win_makuri": 2, "win_sashi": 3, "win_mark": 0, "win_rate": 21.0, "rentai_rate": 36.0, "fukusho_rate": 51.0, "line_index": 0, "line_size": 2, "position_in_line": 1, "is_tanki": false, "upset_rate": 0.24000000000000002, "dominant_style": "逃"}, {"waku": 3, "player_name": "選手3", "player_id": "1003", "rank": "S2", "score": 104.0, "age": 33, "prefecture": "東京", "kiban": 93, "leg_type": "逃", "gear_ratio": 3.92, "b_count": 15, "s_count": 9, "win_nige": 4, "win_makuri": 3, "win_sashi": 4, "win_mark": 0, "win_rate": 19.0, "rentai_rate": 34.0, "fukusho_rate": 49.0, "line_index": 1, "line_size": 3, "position_in_line": 0, "is_tanki": false, "upset_rate": 0.26, "dominant_style": "逃"}, {"waku": 4, "player_name": "選手4", "player_id": "1004", "rank": "A1", "score": 102.0, "age": 34, "prefecture": "東京", "kiban": 94, "leg_type": "追", "gear_ratio": 3.92, "b_count": 20, "s_count": 12, "win_nige": 2, "win_makuri": 4, "win_sashi": 5, "win_mark": 1, "win_rate": 17.0, "rentai_rate": 32.0, "fukusho_rate": 47.0, "line_index": 1, "line_size": 3, "position_in_line": 1, "is_tanki": false, "upset_rate": 0.28, "dominant_style": "逃"}, {"waku": 5, "player_name": "選手5", "player_id": "1005", "rank": "A2", "score": 100.0, "age": 35, "prefecture": "東京", "kiban": 95, "leg_type": "両", "gear_ratio": 3.92, "b_count": 25, "s_count": 15, "win_nige": 0, "win_makuri": 5, "win_sashi": 6, "win_mark": 2, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": 1, "line_size": 3, "position_in_line": 2, "is_tanki": false, "upset_rate": 0.30000000000000004, "dominant_style": "逃"}, {"waku": 6, "player_name": "選手6", "player_id": "1006", "rank": "A3", "score": 98.0, "age": 36, "prefecture": "東京", "kiban": 96, "leg_type": "逃", "gear_ratio": 3.92, "b_count": 30, "s_count": 18, "win_nige": 0, "win_makuri": 6, "win_sashi": 7, "win_mark": 3, "win_rate": 13.0, "rentai_rate": 28.0, "fukusho_rate": 43.0, "line_index": 2, "line_size": 2, "position_in_line": 0, "is_tanki": false, "upset_rate": 0.32, "dominant_style": "逃"}, {"waku": 7, "player_name": "選手7", "player_id": "1007", "rank": "A1", "score": 96.0, "age": 37, "prefecture": "東京", "kiban": 97, "leg_type": "追", "gear_ratio": 3.92, "b_count": 35, "s_count": 21, "win_nige": 0, "win_makuri": 7, "win_sashi": 8, "win_mark": 4, "win_rate": 11.0, "rentai_rate": 26.0, "fukusho_rate": 41.0, "line_index": 2, "line_size": 2, "position_in_line": 1, "is_tanki": false, "upset_rate": 0.34, "dominant_style": "逃"}], "lines": [{"line_index": 0, "members": [{"waku": 1, "player_name": "選手1"}, {"waku": 2, "player_name": "選手2"}], "is_tanki": false}, {"line_index": 1, "members": [{"waku": 3, "player_name": "選手3"}, {"waku": 4, "player_name": "選手4"}, {"waku": 5, "player_name": "選手5"}], "is_tanki": false}, {"line_index": 2, "members": [{"waku": 6, "player_name": "選手6"}, {"waku": 7, "player_name": "選手7"}], "is_tanki": false}], "ai_prediction": {"upset_probability": 0.42, "scenario": "混戦型", "should_bet": true, "predictions": [{"waku": 3, "mark": "◎", "prob_1st": 0.28, "combined_score": 0.85}, {"waku": 1, "mark": "◯", "prob_1st": 0.22, "combined_score": 0.72}, {"waku": 5, "mark": "▲", "prob_1st": 0.18, "combined_score": 0.61}, {"waku": 2, "mark": "△", "prob_1st": 0.12, "combined_score": 0.48}, {"waku": 4, "mark": "", "prob_1st": 0.09, "combined_score": 0.35}, {"waku": 6, "mark": "", "prob_1st": 0.06, "combined_score": 0.22}, {"waku": 7, "mark": "", "prob_1st": 0.05, "combined_score": 0.15}], "recommended_bets": [{"combination": [3, 1, 5], "confidence": 0.0234, "trifecta_odds": 45.2, "expected_value": 1.82}, {"combination": [3, 5, 1], "confidence": 0.0189, "trifecta_odds": 62.1, "expected_value": 1.55}, {"combination": [1, 3, 5], "confidence": 0.0156, "trifecta_odds": 38.7, "expected_value": 1.21}]}}, {"race_id": "202603294102", "race_name": "テストFII", "racecourse": "テスト場", "jyo_cd": "41", "race_number": 2, "start_time": "11:00", "players": [{"waku": 1, "player_name": "選手11", "player_id": "2001", "rank": "A1", "score": 101.0, "age": 29, "prefecture": "大阪", "kiban": 100, "leg_type": "追", "gear_ratio": 3.92, "b_count": 0, "s_count": 0, "win_nige": 1, "win_makuri": 2, "win_sashi": 3, "win_mark": 1, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": -1, "line_size": 0, "position_in_line": -1, "is_tanki": false, "upset_rate": 0.15, "dominant_style": "追"}, {"waku": 2, "player_name": "選手12", "player_id": "2002", "rank": "A1", "score": 102.0, "age": 30, "prefecture": "大阪", "kiban": 100, "leg_type": "追", "gear_ratio": 3.92, "b_count": 0, "s_count": 0, "win_nige": 1, "win_makuri": 2, "win_sashi": 3, "win_mark": 1, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": -1, "line_size": 0, "position_in_line": -1, "is_tanki": false, "upset_rate": 0.15, "dominant_style": "追"}, {"waku": 3, "player_name": "選手13", "player_id": "2003", "rank": "A1", "score": 103.0, "age": 31, "prefecture": "大阪", "kiban": 100, "leg_type": "追", "gear_ratio": 3.92, "b_count": 0, "s_count": 0, "win_nige": 1, "win_makuri": 2, "win_sashi": 3, "win_mark": 1, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": -1, "line_size": 0, "position_in_line": -1, "is_tanki": false, "upset_rate": 0.15, "dominant_style": "追"}, {"waku": 4, "player_name": "選手14", "player_id": "2004", "rank": "A1", "score": 104.0, "age": 32, "prefecture": "大阪", "kiban": 100, "leg_type": "追", "gear_ratio": 3.92, "b_count": 0, "s_count": 0, "win_nige": 1, "win_makuri": 2, "win_sashi": 3, "win_mark": 1, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": -1, "line_size": 0, "position_in_line": -1, "is_tanki": false, "upset_rate": 0.15, "dominant_style": "追"}, {"waku": 5, "player_name": "選手15", "player_id": "2005", "rank": "A1", "score": 105.0, "age": 33, "prefecture": "大阪", "kiban": 100, "leg_type": "追", "gear_ratio": 3.92, "b_count": 0, "s_count": 0, "win_nige": 1, "win_makuri": 2, "win_sashi": 3, "win_mark": 1, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": -1, "line_size": 0, "position_in_line": -1, "is_tanki": false, "upset_rate": 0.15, "dominant_style": "追"}, {"waku": 6, "player_name": "選手16", "player_id": "2006", "rank": "A1", "score": 106.0, "age": 34, "prefecture": "大阪", "kiban": 100, "leg_type": "追", "gear_ratio": 3.92, "b_count": 0, "s_count": 0, "win_nige": 1, "win_makuri": 2, "win_sashi": 3, "win_mark": 1, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": -1, "line_size": 0, "position_in_line": -1, "is_tanki": false, "upset_rate": 0.15, "dominant_style": "追"}, {"waku": 7, "player_name": "選手17", "player_id": "2007", "rank": "A1", "score": 107.0, "age": 35, "prefecture": "大阪", "kiban": 100, "leg_type": "追", "gear_ratio": 3.92, "b_count": 0, "s_count": 0, "win_nige": 1, "win_makuri": 2, "win_sashi": 3, "win_mark": 1, "win_rate": 15.0, "rentai_rate": 30.0, "fukusho_rate": 45.0, "line_index": -1, "line_size": 0, "position_in_line": -1, "is_tanki": false, "upset_rate": 0.15, "dominant_style": "追"}], "lines": [], "ai_prediction": {"upset_probability": 0.18, "scenario": "独走型", "should_bet": false, "predictions": [{"waku": 7, "mark": "◎", "prob_1st": 0.35, "combined_score": 0.9}, {"waku": 6, "mark": "◯", "prob_1st": 0.2, "combined_score": 0.65}], "recommended_bets": []}}];
+const racesMeta = {"generated_at": "2026-03-29 10:00:00", "date": "20260329", "total_races": 2, "venues": ["テスト場"]};
+
+const { createApp, ref, computed } = Vue;
+
+createApp({
+    setup() {
+        const races = ref(racesData);
+        const meta = ref(racesMeta);
+        const selectedVenue = ref('');
+        const showBetOnly = ref(false);
+        const expandedRaces = ref({});
+
+        // 開催場リスト
+        const venues = computed(() => {
+            const vs = [...new Set(races.value.map(r => r.racecourse))];
+            return vs.sort();
+        });
+
+        // フィルタ適用
+        const filteredRaces = computed(() => {
+            let result = races.value;
+            if (selectedVenue.value) {
+                result = result.filter(r => r.racecourse === selectedVenue.value);
+            }
+            if (showBetOnly.value) {
+                result = result.filter(r => r.ai_prediction?.should_bet);
+            }
+            return result;
+        });
+
+        // 購入推奨レース
+        const betRaces = computed(() => {
+            return races.value.filter(r => r.ai_prediction?.should_bet);
+        });
+
+        // レース展開トグル
+        function toggleRace(raceId) {
+            expandedRaces.value[raceId] = !expandedRaces.value[raceId];
+        }
+
+        // 選手を枠番順に
+        function sortedPlayers(race) {
+            return [...(race.players || [])].sort((a, b) => a.waku - b.waku);
+        }
+
+        // 印取得
+        function getMark(race, waku) {
+            if (!race.ai_prediction?.predictions) return '';
+            const p = race.ai_prediction.predictions.find(x => x.waku === waku);
+            return p?.mark || '';
+        }
+
+        // 1着率取得
+        function getProb1st(race, waku) {
+            if (!race.ai_prediction?.predictions) return '—';
+            const p = race.ai_prediction.predictions.find(x => x.waku === waku);
+            if (!p) return '—';
+            return (p.prob_1st * 100).toFixed(1) + '%';
+        }
+
+        // 日付フォーマット
+        function formatDate(dateStr) {
+            if (!dateStr || dateStr.length !== 8) return dateStr;
+            const y = dateStr.substring(0, 4);
+            const m = dateStr.substring(4, 6);
+            const d = dateStr.substring(6, 8);
+            const days = ['日', '月', '火', '水', '木', '金', '土'];
+            const dt = new Date(parseInt(y), parseInt(m) - 1, parseInt(d));
+            return `${y}/${m}/${d}（${days[dt.getDay()]}）`;
+        }
+
+        // 荒れ度カラー
+        function upsetColor(prob) {
+            if (prob >= 0.6) return '#EF4444';
+            if (prob >= 0.4) return '#F59E0B';
+            if (prob >= 0.2) return '#10B981';
+            return '#6B7280';
+        }
+
+        // 印クラス
+        function markClass(mark) {
+            if (mark === '◎') return 'mark-honmei';
+            if (mark === '◯') return 'mark-taikou';
+            if (mark === '▲') return 'mark-tanana';
+            if (mark === '△') return 'mark-renka';
+            return '';
+        }
+
+        // 枠番カラー（1=白, 2=黒, 3=赤, 4=青, 5=黄, 6=緑, 7=橙, 8=桃, 9=紫）
+        function wakuColor(waku) {
+            const colors = {
+                1: '#FFFFFF', 2: '#9CA3AF', 3: '#EF4444', 4: '#3B82F6',
+                5: '#F59E0B', 6: '#10B981', 7: '#F97316', 8: '#EC4899', 9: '#A855F7'
+            };
+            return colors[waku] || '#FFFFFF';
+        }
+
+        // 級班バッジ
+        function rankBadge(rank) {
+            if (rank === 'SS') return 'bg-red-600 text-white';
+            if (rank === 'S1') return 'bg-yellow-600 text-white';
+            if (rank === 'S2') return 'bg-yellow-700 text-white';
+            if (rank === 'A1') return 'bg-blue-600 text-white';
+            if (rank === 'A2') return 'bg-blue-700 text-white';
+            if (rank === 'A3') return 'bg-gray-600 text-white';
+            return 'bg-gray-600 text-white';
+        }
+
+        // 得点カラー（レース内で最高=ゴールド、最低=薄い）
+        function scoreColor(score, players) {
+            if (!players?.length) return '';
+            const scores = players.map(p => p.score);
+            const max = Math.max(...scores);
+            const min = Math.min(...scores);
+            if (score === max) return 'accent-gold font-bold';
+            if (score === min) return 'text-gray-500';
+            return 'text-white';
+        }
+
+        // ライン色（ライン別の左ボーダー）
+        function lineClass(player) {
+            if (player.is_tanki) return 'line-tanki';
+            const li = player.line_index;
+            if (li >= 0 && li <= 4) return `line-${li}`;
+            return '';
+        }
+
+        // ライン色値
+        function lineColor(lineIndex) {
+            const colors = ['#EF4444', '#3B82F6', '#F59E0B', '#10B981', '#A855F7'];
+            return colors[lineIndex % colors.length] || '#6B7280';
+        }
+
+        // レース時刻クラス（過去/間近/これから）
+        function raceTimeClass(race) {
+            if (!race.start_time) return '';
+            const now = new Date();
+            const [h, m] = race.start_time.split(':').map(Number);
+            const raceTime = new Date(now);
+            raceTime.setHours(h, m, 0, 0);
+            const diff = (raceTime - now) / 60000; // 分差
+            if (diff < -10) return 'time-past';
+            if (diff < 30) return 'time-soon';
+            return 'time-upcoming';
+        }
+
+        // 名鑑リンク
+        function hasPlayerDirectory(p) {
+            return !!p.player_name;
+        }
+        function playerDirectoryLink(p) {
+            return `index.html#player=${encodeURIComponent(p.player_name)}`;
+        }
+
+        // レースへスクロール
+        function scrollToRace(raceId) {
+            expandedRaces.value[raceId] = true;
+            // DOMの更新を待ってからスクロール
+            setTimeout(() => {
+                const el = document.querySelector(`[data-race-id="${raceId}"]`);
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 100);
+        }
+
+        // 初期状態：購入推奨レースは展開しておく
+        races.value.forEach(r => {
+            if (r.ai_prediction?.should_bet) {
+                expandedRaces.value[r.race_id] = true;
+            }
+        });
+
+        return {
+            races, meta, selectedVenue, showBetOnly, expandedRaces,
+            venues, filteredRaces, betRaces,
+            toggleRace, sortedPlayers, getMark, getProb1st,
+            formatDate, upsetColor, markClass, wakuColor, rankBadge,
+            scoreColor, lineClass, lineColor, raceTimeClass,
+            hasPlayerDirectory, playerDirectoryLink, scrollToRace,
+        };
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
